@@ -48,7 +48,7 @@ app.get('/notifications/priority', async (req, res) => {
             return res.status(500).json({ error: 'Invalid data format from external API' });
         }
 
-        const notifications = response.data.notifications;
+        const notifications = Array.isArray(response.data.notifications) ? response.data.notifications : [];
         await req.log("info", "service", `Successfully fetched ${notifications.length} notifications. Sorting...`);
 
         notifications.sort((a, b) => {
