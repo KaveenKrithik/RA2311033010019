@@ -30,6 +30,60 @@ const PRIORITY_WEIGHTS = {
     'Event': 1
 };
 
+function getPriorityWeight(type) {
+    return PRIORITY_WEIGHTS[type] || 0;
+}
+
+function getPriorityKey(notification) {
+    const weight = getPriorityWeight(notification.Type);
+    const timestamp = new Date(notification.Timestamp).getTime();
+
+    return {
+        weight,
+        timestamp: Number.isNaN(timestamp) ? 0 : timestamp
+    };
+}
+
+function comparePriority(a, b) {
+    const aKey = getPriorityKey(a);
+    const bKey = getPriorityKey(b);
+
+    if (aKey.weight !== bKey.weight) {
+        return bKey.weight - aKey.weight;
+    }
+
+    return bKey.timestamp - aKey.timestamp;
+}
+
+function shouldReplace(current, candidate) {
+    return comparePriority(candidate, current) < 0;
+}
+
+function selectTopNotifications(notifications, limit) {
+    const topNotifications = [];
+
+    for (const notification of notifications) {
+        if (topNotifications.length < limit) {
+            topNotifications.push(notification);
+            continue;
+        }
+
+        let weakestIndex = 0;
+
+        for (let i = 1; i < topNotifications.length; i++) {
+            if (shouldReplace(topNotifications[weakestIndex], topNotifications[i])) {
+                weakestIndex = i;
+            }
+        }
+
+        if (comparePriority(notification, topNotifications[weakestIndex]) < 0) {
+            topNotifications[weakestIndex] = notification;
+        }
+    }
+
+    return topNotifications.sort(comparePriority);
+}
+
 // Priority Inbox Endpoint
 app.get('/notifications/priority', async (req, res) => {
     try {
@@ -51,24 +105,7 @@ app.get('/notifications/priority', async (req, res) => {
         const notifications = Array.isArray(response.data.notifications) ? response.data.notifications : [];
         await req.log("info", "service", `Successfully fetched ${notifications.length} notifications. Sorting...`);
 
-        notifications.sort((a, b) => {
-            // First level: Sort by Priority Weight
-            const weightA = PRIORITY_WEIGHTS[a.Type] || 0;
-            const weightB = PRIORITY_WEIGHTS[b.Type] || 0;
-            
-            if (weightA !== weightB) {
-                return weightB - weightA; // Descending weight
-            }
-            
-            // Second level: Sort by Recency (Timestamp)
-            const timeA = new Date(a.Timestamp).getTime();
-            const timeB = new Date(b.Timestamp).getTime();
-            
-            return timeB - timeA; // Descending timestamp (newest first)
-        });
-
-        // Slice top 10
-        const top10Notifications = notifications.slice(0, 10);
+        const top10Notifications = selectTopNotifications(notifications, 10);
         
         await req.log("info", "handler", `Successfully processed priority sorting. Returning top ${top10Notifications.length} items.`);
 
