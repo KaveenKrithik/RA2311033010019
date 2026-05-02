@@ -1,6 +1,6 @@
 const express = require('express');
 const axios = require('axios');
-const Log = require('./logger');
+const Log = require('../logging_middleware/index.js');
 require('dotenv').config();
 
 const app = express();

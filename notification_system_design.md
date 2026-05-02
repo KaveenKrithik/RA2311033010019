@@ -1,157 +1,136 @@
-# Notification System Design
-
-## Stage 1: API Design
+# Stage 1
 
 ### Core Actions
 1. Fetch latest notifications
 2. Mark notification as read
-3. Real-time delivery mechanism
+3. Listen for real-time pushed payloads
 
 ### REST APIs
 
 **1. Fetch Notifications**
-- **Endpoint**: `GET /api/v1/notifications`
-- **Headers**: `Authorization: Bearer <token>`
-- **Response**:
+- Endpoint: `GET /api/notifications`
+- Headers: `Authorization: Bearer <token>`
+- Response Structure:
 ```json
 {
   "status": "success",
   "data": [
     {
-      "id": "d146095a-0d86-4a34-9e69-3900a14576bc",
+      "id": "uuid",
       "type": "Placement",
-      "message": "CSX Corporation hiring",
-      "isRead": false,
-      "timestamp": "2026-04-22T17:51:30Z"
+      "message": "string",
+      "timestamp": "ISO-8601"
     }
   ]
 }
 ```
 
-**2. Mark Notification as Read**
-- **Endpoint**: `PATCH /api/v1/notifications/:id/read`
-- **Headers**: `Authorization: Bearer <token>`
-- **Request**: `{}` (Empty body, implicitly sets read status to true)
-- **Response**:
+**2. Mark as Read**
+- Endpoint: `PATCH /api/notifications/{id}/read`
+- Headers: `Authorization: Bearer <token>`
+- Request Body: `{}`
+- Response Structure:
 ```json
 {
-  "status": "success",
-  "message": "Notification marked as read"
+  "status": "success"
 }
 ```
 
-### Real-Time Delivery Mechanism
-I propose using WebSockets (e.g., via Socket.io or direct native WebSockets) for real-time delivery. When a user connects to the web app, they establish a secure WebSocket connection. The backend can then push JSON payload events (e.g., `notification_received`) directly to the active client as soon as a new notification is generated, bypassing the need for frequent polling.
+### Real-Time Mechanism
+A persistent **WebSocket** connection is established between the client and the server. The backend emits an event directly to the user's socket session upon notification generation, mitigating traffic bursts against HTTP servers from constant polling.
 
----
-
-## Stage 2: Persistent Storage
+# Stage 2
 
 ### Database Choice
-**PostgreSQL** is recommended due to its strong ACID compliance, relational capabilities (ideal for joining students and notifications), and support for advanced indexing.
+**PostgreSQL** provides ACID compliance, strong relations between the `students` table and `notifications`, robust index mechanisms like B-Tree and GIN, and is perfectly scalable for campus operations.
 
 ### Schema
-**Table: notifications**
-- `id` (UUID, Primary Key)
-- `studentId` (Integer, Indexed, Foreign Key to students table)
-- `type` (Enum: 'Placement', 'Event', 'Result')
-- `message` (Text)
-- `isRead` (Boolean, Default: false)
-- `createdAt` (Timestamp, Default: CURRENT_TIMESTAMP)
-
-### Data Volume Issues
-As data volume increases, single-table reads/writes will slow down. Solutions:
-1. **Partitioning**: Partition the table by `createdAt` (e.g., monthly) to keep active query sizes small.
-2. **Archiving**: Move notifications older than 6 months to cold storage.
-3. **Caching**: Store unread counts and recent notifications in Redis.
-
-### SQL Query (Insert)
 ```sql
-INSERT INTO notifications (id, studentId, type, message, isRead, createdAt)
-VALUES (gen_random_uuid(), 1042, 'Placement', 'Advanced Micro Devices Inc. hiring', false, CURRENT_TIMESTAMP);
+CREATE TABLE notifications (
+    id UUID PRIMARY KEY,
+    studentId INT NOT NULL,
+    notificationType VARCHAR(20) NOT NULL,
+    message TEXT NOT NULL,
+    isRead BOOLEAN DEFAULT false,
+    createdAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
----
+### Volume Issues & Solutions
+As the `notifications` table grows to tens of millions of records, read and write performance deteriorates dramatically. To resolve this:
+1. **Partitioning**: Partition tables by date (e.g., monthly). This keeps active queries operating on significantly smaller, in-memory datasets.
+2. **Archival**: Implement automated cron jobs to purge or move messages older than 6 months into cold storage solutions (e.g., AWS S3 or a secondary DB).
 
-## Stage 3: Query Optimization
+# Stage 3
 
-**Query Analysis**
-```sql
-SELECT * FROM notifications WHERE studentID = 1042 AND isRead = false ORDER BY createdAt DESC;
-```
-**Accuracy:** The query is accurate for fetching unread messages for a specific student, sorted by newest first.
-**Slowness Reason:** With 5,000,000 records, filtering by `studentID` and `isRead` without an index causes a full table scan. Additionally, the `ORDER BY createdAt` phase requires sorting in memory.
-**Improvement:** Create a composite index. Single-column indexing (on every column) is poor advice because it increases disk usage and severely degrades write (INSERT/UPDATE) performance unnecessarily.
+### Query Analysis
+The query is logically accurate. It fetches unread records for a specific student sorted by creation time.
+It is slow because the database executes a **Sequential Scan** (checking 5 million rows individually). There are no indexes, forcing data into memory to sort by `createdAt DESC`.
 
-**Index Creation:**
-```sql
-CREATE INDEX idx_student_unread_recent ON notifications (studentId, isRead, createdAt DESC);
-```
-**Computation Cost:** Lookup becomes O(log N) instead of O(N), significantly reducing disk I/O and CPU overhead.
+### Proposed Change & Cost
+Create a composite index to directly cover the WHERE and ORDER BY clauses: `CREATE INDEX idx_unread_recent ON notifications (studentId, isRead, createdAt DESC);`
+Computation cost shifts from `O(N)` scans to an efficient `O(log N)` B-Tree search.
 
-**Query (Placement in last 7 days):**
+### Index Every Column?
+This is extremely bad advice. While indexes improve read speeds, they degrade write performance significantly because every index must be individually updated during INSERT/UPDATE operations. They also consume heavy disk space and cache memory.
+
+### 7-Day Search Query
 ```sql
 SELECT DISTINCT studentId 
 FROM notifications 
-WHERE type = 'Placement' 
+WHERE notificationType = 'Placement' 
   AND createdAt >= NOW() - INTERVAL '7 days';
 ```
 
----
+# Stage 4
 
-## Stage 4: Scalability
+### Strategy and Tradeoffs
+Fetching notifications on every page load overloads the database and unnecessarily drains connection pools.
 
-**Strategy for High Load**
-Fetching on every page load overloads the database.
-1. **Caching Layer (Redis):** Cache the first page of notifications and the "unread count" for active users in Redis. When a new notification arrives, update both the DB and the Redis cache.
-2. **Tradeoffs:** 
-   - *Pros*: Drastically reduces DB reads, exceptionally fast.
-   - *Cons*: Cache invalidation complexity, eventual consistency, increased infrastructure costs and maintenance.
+**Solution: Redis Caching Layer**
+Cache the first page of notifications and the user's unread counter in Redis. When the client requests notifications, the application reads RAM rather than disk.
+- **Tradeoffs**: Excellent reduction of DB load, extreme read speed. However, it requires additional infrastructure cost and creates cache invalidation complexities (e.g., synchronizing states).
 
----
+**Alternative Solution: Client-Side State**
+Maintain state using the WebSocket connection and IndexedDB on the client.
+- **Tradeoffs**: Zero server overload on pagination, but potential for desynchronization if the active socket drops.
 
-## Stage 5: Reliability & Redesign
+# Stage 5
 
-**Shortcomings of Provided Pseudocode:**
-- **Synchronous Execution:** Email API, DB saving, and push are happening sequentially in a loop. A slow API will block the entire process.
-- **No Fault Tolerance/Retry:** If `send_email` fails on user 100, the loop crashes, and users 101-50000 get nothing.
-- **Coupling:** Database saves shouldn't depend on external Email API success directly in the same synchronous block.
+### Shortcomings
+1. **Single Point of Failure**: The application drops directly if the `send_email` third-party API rate-limits or fails. Users 201 through 50,000 receive nothing.
+2. **Synchronous Blocking**: Network requests are executing sequentially inside a loop. This requires exponential time, blocking application threads.
+3. **Tight Coupling**: Database connections and push infrastructure are locked to email success.
 
-**Redesign:**
-Use an Event-Driven architecture with a Message Broker / Job Queue (e.g., BullMQ, RabbitMQ, Kafka). DB inserts and Queue pushes happen together (transactionally if possible), but the actual Email sending is handled asynchronously by workers.
+### Redesign & Concurrency
+No, saving to the database and sending an email should not happen simultaneously or sequentially in the same block.
 
-**Revised Pseudocode:**
+The internal Database insertion should be completed in a high-speed batch operation or transaction. Following this, 50,000 individual tasks should be enqueued into an asynchronous Message Broker (e.g., BullMQ, RabbitMQ). Independent worker threads then pick up the tasks to safely execute the third-party email API calls. This prevents user-facing timeouts and enables retry policies.
+
+### Revised Pseudocode
 ```python
 function notify_all(student_ids: array, message: string):
-    # Batch insert into DB for speed
-    batch_save_to_db(student_ids, message)
+    batch_insert_db(student_ids, message)
     
-    # Enqueue tasks to a message broker (e.g., Redis Queue)
     for student_id in student_ids:
-        enqueue_job(queue_name="email_queue", payload={student_id, message})
-        enqueue_job(queue_name="push_queue", payload={student_id, message})
+        job_queue.add("email_task", { student_id, message })
+        job_queue.add("push_task", { student_id, message })
 
-# Worker 1 (Email worker - can run concurrently)
-function process_email_queue(job):
+function process_email_task(job):
     try:
         send_email(job.student_id, job.message)
     except APIError:
         job.retry(delay=5_minutes, max_retries=3)
-
-# Worker 2 (App Push worker)
-function process_push_queue(job):
-    try:
-        push_to_app(job.student_id, job.message)
-    except PushError:
-        job.retry()
 ```
 
----
+# Stage 6
 
-## Stage 6: Implementation Approach
+### Priority Inbox Code
+Implemented in `notification_app_be/app.js`.
 
-For Stage 6, I have implemented an Express application (`app.js`) that fetches real-time data from the provided API, sorts them based on a combined priority formula (Type Weight and Recency), and returns the top 10 results. 
-- Type Weights: Placement (3) > Result (2) > Event (1).
-- Recency is used as a secondary descending sort. 
-- It uses a custom logging middleware implemented in (`logger.js`). This middleware captures requests, processes, errors, and system configuration directly to the evaluation logging API. Local built-in console.logs or file loggers are avoided entirely.
+### Approach and Top 10 Efficiency
+The application asynchronously retrieves the payloads from the Evaluation API. It dynamically applies integer weightings based on the `Type` field.
+When scaling this to continuous data streams, fully sorting the array using `O(N log N)` mechanics becomes inefficient.
+To maintain a Top 10 list efficiently against continuous streams, I would implement a **Min-Heap (Priority Queue)** constrained to a strict length of 10. As new payloads stream in, insertion operations only cost `O(log K)` (where K=10). This avoids re-sorting the entire dataset entirely. For a bulk static fetch, standard Array prototype sorting is utilized.
 
+Zero native logs exist; every debug/status trace utilizes the required `logging_middleware` interface.
