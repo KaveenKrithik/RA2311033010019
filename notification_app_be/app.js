@@ -7,13 +7,14 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const EXTERNAL_API_URL = 'http://20.207.122.201/evaluation-service/notifications';
 
-// Unified Logging Middleware 
-const loggingMiddleware = async (req, res, next) => {
-    await Log("backend", "info", "middleware", `Incoming Request: ${req.method} ${req.url}`);
+const loggingMiddleware = (req, res, next) => {
+    req.log = (level, pkg, message) => Log("backend", level, pkg, message);
+
+    req.log("info", "middleware", `Incoming Request: ${req.method} ${req.url}`);
     
     res.on('finish', async () => {
         const level = res.statusCode >= 400 ? "error" : "info";
-        await Log("backend", level, "middleware", `Response Sent: ${res.statusCode} for ${req.method} ${req.url}`);
+        await req.log(level, "middleware", `Response Sent: ${res.statusCode} for ${req.method} ${req.url}`);
     });
     
     next();
@@ -32,7 +33,7 @@ const PRIORITY_WEIGHTS = {
 // Priority Inbox Endpoint
 app.get('/notifications/priority', async (req, res) => {
     try {
-        await Log("backend", "info", "handler", "Fetching notifications from evaluation API");
+        await req.log("info", "handler", "Fetching notifications from evaluation API");
         
         const response = await axios.get(EXTERNAL_API_URL, {
             headers: {
@@ -43,12 +44,12 @@ app.get('/notifications/priority', async (req, res) => {
         });
         
         if (!response.data || !response.data.notifications) {
-            await Log("backend", "error", "handler", "Invalid data format received from external API");
+            await req.log("error", "handler", "Invalid data format received from external API");
             return res.status(500).json({ error: 'Invalid data format from external API' });
         }
 
         const notifications = response.data.notifications;
-        await Log("backend", "info", "service", `Successfully fetched ${notifications.length} notifications. Sorting...`);
+        await req.log("info", "service", `Successfully fetched ${notifications.length} notifications. Sorting...`);
 
         notifications.sort((a, b) => {
             // First level: Sort by Priority Weight
@@ -69,7 +70,7 @@ app.get('/notifications/priority', async (req, res) => {
         // Slice top 10
         const top10Notifications = notifications.slice(0, 10);
         
-        await Log("backend", "info", "handler", `Successfully processed priority sorting. Returning top ${top10Notifications.length} items.`);
+        await req.log("info", "handler", `Successfully processed priority sorting. Returning top ${top10Notifications.length} items.`);
 
         res.status(200).json({
             status: 'success',
@@ -77,7 +78,7 @@ app.get('/notifications/priority', async (req, res) => {
         });
 
     } catch (error) {
-        await Log("backend", "error", "handler", `Error processing priority inbox: ${error.message}`);
+        await req.log("error", "handler", `Error processing priority inbox: ${error.message}`);
         res.status(500).json({
             error: 'Internal Server Error'
         });
@@ -86,5 +87,4 @@ app.get('/notifications/priority', async (req, res) => {
 
 app.listen(PORT, async () => {
     await Log("backend", "info", "config", `Server started and listening on port ${PORT}`);
-    console.log(`Server successfully started on port ${PORT}`);
 });

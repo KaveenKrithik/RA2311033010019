@@ -28,7 +28,7 @@ async function Log(stack, level, pkg, message) {
         
         return response.data;
     } catch (error) {
-        console.error("Failed to send log to evaluation server:", error.response ? error.response.data : error.message);
+        return null;
     }
 }
 
